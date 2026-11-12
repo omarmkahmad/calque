@@ -1,5 +1,31 @@
 # calque
 
+> [!NOTE]
+>
+> ## This fork: full-detail mirroring
+>
+> This is a fork of [agilezebra/calque](https://github.com/agilezebra/calque) that mirrors events **with their
+> detail** rather than as anonymised busy blocks. Where the rest of this README differs, this section wins.
+>
+> - **Copied fields**: title, location, URL, notes, time zone, availability and the all-day flag, as well as the
+>   times. A change to any of them updates the copy. Alarms and attendees are never copied.
+> - **Marker**: the tracking marker is the *last line* of the copy's notes, after the copied notes. Blocks
+>   tagged by stock calque (marker as the whole field) are still recognised.
+> - **Defaults**: `--title "{title}"`, `--lookback 14`, `--lookahead 180`, `--max-deletes 25`
+>   (`--max-deletes none` removes the limit), and `--no-exclude-all-day`, `--no-exclude-out-of-hours`,
+>   `--no-exclude-clashes`.
+> - **`--exclude-free`**: skip events whose availability is free.
+> - **Adoption** (`--adopt`, on by default): an untagged event already in the target with the same title,
+>   start and end as a source event is tagged as its copy instead of being duplicated, which takes over the
+>   copies another mirroring tool left behind. Of a set of look-alike events across calendars, one is kept as
+>   the original (an invitation, else the earliest created, else the earliest-listed calendar) and only the
+>   others are adopted; an invitation is never adopted or duplicated. `--no-adopt` turns this off.
+> - **Link fallback**: if a target hands a copy back without the URL it was written with, the link is put on
+>   the first line of the copy's notes on the next run.
+> - **Dry runs** report the fan-out from the primary as a real run would perform it, including the events the
+>   first hop would have written.
+
+
 [![Build](https://github.com/agilezebra/calque/actions/workflows/build.yml/badge.svg)](https://github.com/agilezebra/calque/actions/workflows/build.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=agilezebra_calque&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=agilezebra_calque)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=agilezebra_calque&metric=coverage)](https://sonarcloud.io/summary/new_code?id=agilezebra_calque)
