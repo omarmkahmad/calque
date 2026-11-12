@@ -115,6 +115,11 @@ def non_negative_int(value: str) -> int:
     return number
 
 
+def delete_limit(value: str) -> int | None:
+    """Parse the most deletes a pass may make: a whole number of zero or more, or ``none`` for no limit."""
+    return None if value.lower() == "none" else non_negative_int(value)
+
+
 def command(value: str) -> str:
     """Check that a command splits into at least one word, rejecting an unclosed quote or a blank value."""
     try:
@@ -147,7 +152,7 @@ def parse_arguments(arguments: list[str] | None) -> Namespace:
     log_defaults = inspect.signature(configure_logging).parameters
     parser = ArgumentParser(
         prog="calque",
-        description="Mirror accepted events from one local calendar into another as anonymised busy blocks.",
+        description="Mirror accepted events between local calendars with their full detail.",
         formatter_class=DefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -196,10 +201,10 @@ def parse_arguments(arguments: list[str] | None) -> Namespace:
     )
     parser.add_argument(
         "--max-deletes",
-        type=non_negative_int,
+        type=delete_limit,
         default=defaults.max_deletes,
         metavar="N",
-        help="skip any mirror pass that would delete more than N blocks, then exit non-zero unless a dry run (default: no limit)",
+        help="skip any mirror pass that would delete more than N blocks, then exit non-zero unless a dry run; none for no limit",
     )
     parser.add_argument(
         "--dry-run",
@@ -277,6 +282,21 @@ def parse_arguments(arguments: list[str] | None) -> Namespace:
         action=BooleanOptionalAction,
         default=defaults.exclude_all_day,
         help="skip all-day events",
+    )
+    parser.add_argument(
+        "--exclude-free",
+        action=BooleanOptionalAction,
+        default=defaults.exclude_free,
+        help="skip events whose availability is free",
+    )
+    parser.add_argument(
+        "--adopt",
+        action=BooleanOptionalAction,
+        default=defaults.adopt,
+        help=(
+            "tag an untagged event already in the target that has the same title, start and end as a source "
+            "event, instead of writing a duplicate next to it"
+        ),
     )
     parser.add_argument(
         "--exclude-out-of-hours",

@@ -32,7 +32,7 @@ class DeleteLimitError(CalqueError):
     def __init__(self, limit: int | None) -> None:
         super().__init__(
             f"skipped mirror passes that would delete more than {limit} mirror blocks; "
-            "run once without --max-deletes to apply them",
+            "run once with a higher --max-deletes, or --max-deletes none, to apply them",
         )
 
 

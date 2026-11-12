@@ -7,11 +7,11 @@ the active ones, and :func:`excluded` runs them.
 
 import logging
 import re
-from collections.abc import Callable, Container, Iterable, Iterator
+from collections.abc import Callable, Collection, Container, Iterable, Iterator
 from datetime import UTC, date, datetime, time, timedelta
 
 from calque.config import Config
-from calque.model import Event, Participation, Status, untag
+from calque.model import Availability, Event, Participation, Status
 
 Exclusion = Callable[[Event], bool]
 
@@ -99,13 +99,38 @@ def by_origin(target: str) -> Exclusion:
 
     def rule(event: Event) -> bool:
         """True when the event is our mirror block originating from the target calendar."""
-        marker = untag(event.notes)
-        result = marker is not None and marker.origin == target
+        result = event.tag is not None and event.tag.origin == target
         if result:
             logging.debug("excluding %r as our own mirror returning to %s", event.title, target)
         return result
 
     return rule
+
+
+def by_copy(copies: Collection[str]) -> Exclusion:
+    """Build a rule excluding untagged events identified as duplicates of an event in another calendar.
+
+    Such a duplicate (a copy left by another mirroring tool, or the same invitation received on a second
+    account) already stands for an event that is mirrored from elsewhere; mirroring it onward as well would
+    duplicate that event everywhere. A copy that is adopted, and so tagged, is no longer excluded.
+    """
+
+    def rule(event: Event) -> bool:
+        """True when the event is an untagged copy."""
+        result = event.tag is None and event.identifier in copies
+        if result:
+            logging.debug("excluding %r as a duplicate of another calendar's event", event.title)
+        return result
+
+    return rule
+
+
+def is_free(event: Event) -> bool:
+    """Whether the event is marked as free, so it does not block any time."""
+    result = event.availability is Availability.FREE
+    if result:
+        logging.debug("excluding %r as free", event.title)
+    return result
 
 
 def is_all_day(event: Event) -> bool:
@@ -160,7 +185,25 @@ def by_hours(days: Container[int], opening: time, closing: time) -> Exclusion:
     return rule
 
 
-def rules(config: Config, events: Iterable[Event], source: str, target: str) -> tuple[Exclusion, ...]:
+def intrinsics(config: Config) -> Iterator[Exclusion]:
+    """Yield the rules that judge an event on its own properties, whichever calendars it moves between."""
+    yield by_participation(config.statuses)
+    yield is_cancelled
+    if config.exclude_patterns:
+        yield by_title(config.exclude_patterns)
+    if config.exclude_all_day:
+        yield is_all_day
+    if config.exclude_free:
+        yield is_free
+    if config.exclude_out_of_hours:
+        yield by_hours(config.work_days, config.work_start, config.work_end)
+    if config.cleanup:
+        yield by_passed()
+
+
+def rules(
+    config: Config, events: Iterable[Event], source: str, target: str, copies: Collection[str] = ()
+) -> tuple[Exclusion, ...]:
     """Return the active exclusion rule chain for mirroring from ``source`` into ``target`` given its busy ``events``.
 
     The full exclusion chain:
@@ -169,9 +212,11 @@ def rules(config: Config, events: Iterable[Event], source: str, target: str) -> 
       - cancelled events
       - title patterns
       - all-day
+      - free
       - out-of-hours
       - finished events, when cleanup is enabled
     - our own mirror blocks returning to ``target``
+    - untagged ``copies``: duplicates of another calendar's event, which are not mirrored a second time
     - events the ``source`` calendar's include patterns don't whitelist, when it has any
     - clash against target busy periods - which itself filters using the intrinsic rules
 
@@ -181,21 +226,8 @@ def rules(config: Config, events: Iterable[Event], source: str, target: str) -> 
     focus block, all-day, out-of-hours or unaccepted event never blocks a source event. The include-pattern
     whitelist is keyed on ``source`` and applied only to source events, never to the target's busy periods.
     """
-
-    def build() -> Iterable[Exclusion]:
-        yield by_participation(config.statuses)
-        yield is_cancelled
-        if config.exclude_patterns:
-            yield by_title(config.exclude_patterns)
-        if config.exclude_all_day:
-            yield is_all_day
-        if config.exclude_out_of_hours:
-            yield by_hours(config.work_days, config.work_start, config.work_end)
-        if config.cleanup:
-            yield by_passed()
-
-    intrinsic = tuple(build())
-    exclusions = (*intrinsic, by_origin(target))
+    intrinsic = tuple(intrinsics(config))
+    exclusions = (*intrinsic, by_origin(target), by_copy(copies))
     if whitelist := config.calendar_include_patterns.get(source):
         exclusions = (*exclusions, unlisted(whitelist))
     if not config.exclude_clashes:

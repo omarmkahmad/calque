@@ -35,5 +35,11 @@ def test_source_override_wins_over_the_target_override() -> None:
     assert config.title_for_calendar(calendar("Client.Calendar"), calendar("Work.MyCompany")) == "{account}: {title}"
 
 
-def test_max_deletes_defaults_to_no_limit() -> None:
-    assert Config().max_deletes is None
+def test_defaults_mirror_every_event_in_full() -> None:
+    config = Config()
+    assert config.title == "{title}"
+    assert (config.lookback, config.lookahead) == (14, 180)
+    excluding = (config.exclude_all_day, config.exclude_out_of_hours, config.exclude_clashes, config.exclude_free)
+    assert excluding == (False, False, False, False)
+    assert config.adopt
+    assert config.max_deletes == 25

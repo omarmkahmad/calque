@@ -10,6 +10,7 @@ import pytest
 from calque.config import Config
 from calque.exclusions import (
     by_clash,
+    by_copy,
     by_hours,
     by_origin,
     by_participation,
@@ -19,10 +20,11 @@ from calque.exclusions import (
     included,
     is_all_day,
     is_cancelled,
+    is_free,
     rules,
     unlisted,
 )
-from calque.model import Event, Participation, Status, Window, tag
+from calque.model import Availability, Event, Participation, Status, Tag, Window
 
 WORK_DAYS = frozenset({0, 1, 2, 3, 4})
 SOURCE = "Source.Calendar"
@@ -51,18 +53,21 @@ def event(
     all_day: bool = False,
     participation: Participation = Participation.ACCEPTED,
     status: Status = Status.CONFIRMED,
-    notes: str | None = None,
+    tag: Tag | None = None,
+    availability: Availability = Availability.BUSY,
+    identifier: str = "id",
 ) -> Event:
     window = Window(start, start + timedelta(hours=hours))
     return Event(
-        identifier="id",
+        identifier=identifier,
         title=title,
         account="Client",
         window=window,
         all_day=all_day,
         participation=participation,
         status=status,
-        notes=notes,
+        tag=tag,
+        availability=availability,
     )
 
 
@@ -98,7 +103,7 @@ def test_rules_leaves_a_source_without_include_patterns_unfiltered(start: dateti
 def test_rules_whitelist_does_not_filter_target_busy_periods(start: datetime) -> None:
     # The whitelist is keyed on the source, so a target busy period that the source would not list
     # still counts as busy and blocks an overlapping listed source event from being mirrored in.
-    config = Config(calendar_include_patterns={"Home.Shared": (re.compile(r"graham busy"),)})
+    config = Config(calendar_include_patterns={"Home.Shared": (re.compile(r"graham busy"),)}, exclude_clashes=True)
     exclusions = rules(config, (event("Team meeting", start),), "Home.Shared", TARGET)
     assert excluded(event("Viewing (graham busy)", start), exclusions)
 
@@ -214,18 +219,17 @@ def test_rules_keeps_finished_events_without_cleanup() -> None:
 
 def test_by_origin_excludes_only_mirrors_returning_to_the_target(start: datetime) -> None:
     rule = by_origin("ClientA.Calendar")
-    assert rule(event("bounce", start, notes=tag("ClientA.Calendar", "id")))
-    assert not rule(event("onward", start, notes=tag("ClientB.Calendar", "id")))
-    assert not rule(event("genuine", start, notes="just some notes"))
-    assert not rule(event("blank", start))
+    assert rule(event("bounce", start, tag=Tag("ClientA.Calendar", "id")))
+    assert not rule(event("onward", start, tag=Tag("ClientB.Calendar", "id")))
+    assert not rule(event("genuine", start))
 
 
 def test_rules_excludes_a_mirror_only_when_it_would_return_to_its_origin(start: datetime) -> None:
     # A block this sync wrote into ClientA from ClientA must never be mirrored back (a mirror of a mirror)...
     exclusions = rules(Config(exclude_clashes=False), (), SOURCE, "ClientA.Calendar")
-    assert excluded(event("ClientA: Follow Up", start, notes=tag("ClientA.Calendar", "id")), exclusions)
+    assert excluded(event("ClientA: Follow Up", start, tag=Tag("ClientA.Calendar", "id")), exclusions)
     # ...but a block sourced from another client still propagates onward to ClientA.
-    assert not excluded(event("ClientB busy", start, notes=tag("ClientB.Calendar", "id")), exclusions)
+    assert not excluded(event("ClientB busy", start, tag=Tag("ClientB.Calendar", "id")), exclusions)
 
 
 def test_is_all_day_excludes_only_all_day_events(start: datetime) -> None:
@@ -256,7 +260,7 @@ def test_rules_ignores_busy_periods_with_unmirrored_participation(start: datetim
 
 
 def test_rules_gates_all_day_and_out_of_hours(start: datetime) -> None:
-    enabled = rules(Config(exclude_patterns=(), exclude_clashes=False), (), SOURCE, TARGET)
+    enabled = rules(Config(exclude_patterns=(), exclude_all_day=True, exclude_out_of_hours=True), (), SOURCE, TARGET)
     assert excluded(event("holiday", start, all_day=True), enabled)
     assert excluded(event("weekend", datetime(2026, 6, 6, 9, 0, tzinfo=UTC)), enabled)
 
@@ -267,3 +271,31 @@ def test_rules_gates_all_day_and_out_of_hours(start: datetime) -> None:
         TARGET,
     )
     assert not excluded(event("weekend holiday", datetime(2026, 6, 6, 9, 0, tzinfo=UTC), all_day=True), disabled)
+
+
+def test_is_free_excludes_only_free_events(start: datetime) -> None:
+    assert is_free(event("lunch hold", start, availability=Availability.FREE))
+    assert not is_free(event("meeting", start))
+    assert not is_free(event("maybe", start, availability=Availability.TENTATIVE))
+    assert not is_free(event("unrecorded", start, availability=Availability.UNSUPPORTED))
+
+
+def test_rules_drops_free_events_only_with_exclude_free(start: datetime) -> None:
+    free = event("lunch hold", start, availability=Availability.FREE)
+    assert not excluded(free, rules(Config(), (), SOURCE, TARGET))
+    filtering = rules(Config(exclude_free=True), (), SOURCE, TARGET)
+    assert excluded(free, filtering)
+    assert not excluded(event("meeting", start), filtering)
+
+
+def test_by_copy_excludes_an_untagged_duplicate_until_it_is_tagged(start: datetime) -> None:
+    rule = by_copy(frozenset({"copy"}))
+    assert rule(event("Clinic", start, identifier="copy"))
+    assert not rule(event("Clinic", start, identifier="original"))
+    assert not rule(event("Clinic", start, identifier="copy", tag=Tag("Work.Calendar", "original")))
+
+
+def test_rules_does_not_mirror_a_duplicate_of_another_calendars_event(start: datetime) -> None:
+    exclusions = rules(Config(), (), SOURCE, TARGET, frozenset({"copy"}))
+    assert excluded(event("Clinic", start, identifier="copy"), exclusions)
+    assert not excluded(event("Clinic", start, identifier="original"), exclusions)

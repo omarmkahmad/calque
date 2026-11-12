@@ -114,8 +114,29 @@ def test_to_config_projects_cleanup() -> None:
     assert cli.to_config(cli.parse_arguments(["--cleanup", "Personal", "Work"])).cleanup is True
 
 
-def test_parse_arguments_defaults_max_deletes_to_no_limit() -> None:
-    assert cli.parse_arguments(["Personal", "Work"]).max_deletes is None
+def test_parse_arguments_defaults_max_deletes_to_a_safety_limit() -> None:
+    assert cli.parse_arguments(["Personal", "Work"]).max_deletes == 25
+
+
+def test_parse_arguments_reads_no_limit_for_max_deletes() -> None:
+    assert cli.parse_arguments(["--max-deletes", "none", "Personal", "Work"]).max_deletes is None
+
+
+def test_parse_arguments_defaults_to_mirroring_everything_with_real_titles() -> None:
+    parsed = cli.parse_arguments(["Personal", "Work"])
+    assert parsed.title == "{title}"
+    assert (parsed.lookback, parsed.lookahead) == (14, 180)
+    assert not parsed.exclude_all_day
+    assert not parsed.exclude_out_of_hours
+    assert not parsed.exclude_clashes
+    assert not parsed.exclude_free
+    assert parsed.adopt
+
+
+def test_parse_arguments_reads_exclude_free_and_no_adopt() -> None:
+    config = cli.to_config(cli.parse_arguments(["--exclude-free", "--no-adopt", "Personal", "Work"]))
+    assert config.exclude_free
+    assert not config.adopt
 
 
 def test_parse_arguments_reads_max_deletes() -> None:
@@ -138,7 +159,7 @@ def test_parse_arguments_accepts_a_zero_max_deletes() -> None:
 
 def test_to_config_projects_max_deletes() -> None:
     assert cli.to_config(cli.parse_arguments(["--max-deletes", "5", "Personal", "Work"])).max_deletes == 5
-    assert cli.to_config(cli.parse_arguments(["Personal", "Work"])).max_deletes is None
+    assert cli.to_config(cli.parse_arguments(["Personal", "Work"])).max_deletes == 25
 
 
 def test_parse_arguments_collects_muted_calendars_into_a_set() -> None:

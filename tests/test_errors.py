@@ -26,4 +26,4 @@ def test_delete_limit_error_names_the_limit() -> None:
     assert isinstance(exception, CalqueError)
     message = str(exception)
     assert "5" in message
-    assert "without --max-deletes" in message
+    assert "--max-deletes none" in message
