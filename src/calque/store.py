@@ -1,4 +1,4 @@
-"""EventKit boundary: read a calendar's events and write anonymised busy blocks, all locally.
+"""EventKit boundary: read a calendar's events and write their mirrored copies, all locally.
 
 Every impure interaction with macOS lives here so the reconciliation core stays pure. PyObjC
 returns untyped objects, so this module is the one place the type checker is relaxed.
@@ -15,7 +15,36 @@ import EventKit
 import Foundation
 
 from calque.errors import AccessError, CalendarError, WriteError
-from calque.model import Event, Mirror, Participation, Plan, Source, Status, Tag, Window, tag, untag
+from calque.model import (
+    Availability,
+    Event,
+    Mirror,
+    Participation,
+    Plan,
+    Source,
+    Status,
+    Tag,
+    Window,
+    clean,
+    strip_marker,
+    tag,
+    untag,
+)
+
+AVAILABILITIES = {
+    EventKit.EKEventAvailabilityBusy: Availability.BUSY,
+    EventKit.EKEventAvailabilityFree: Availability.FREE,
+    EventKit.EKEventAvailabilityTentative: Availability.TENTATIVE,
+    EventKit.EKEventAvailabilityUnavailable: Availability.UNAVAILABLE,
+}
+
+# The ``EKCalendarEventAvailabilityMask`` bit a calendar sets for each availability it can store.
+AVAILABILITY_MASKS = {
+    Availability.BUSY: EventKit.EKCalendarEventAvailabilityBusy,
+    Availability.FREE: EventKit.EKCalendarEventAvailabilityFree,
+    Availability.TENTATIVE: EventKit.EKCalendarEventAvailabilityTentative,
+    Availability.UNAVAILABLE: EventKit.EKCalendarEventAvailabilityUnavailable,
+}
 
 
 def to_nsdate(value: datetime) -> Any:
@@ -33,21 +62,72 @@ def to_window(event: Any) -> Window:
     return Window(to_datetime(event.startDate()), to_datetime(event.endDate()))
 
 
-def to_event(item: Any, account: str) -> Event:
-    """Convert an EventKit event to an Event for the given account.
+def identify(item: Any) -> str:
+    """The identifier of one occurrence of an EventKit event.
 
     Every occurrence of a recurring event shares one ``eventIdentifier``, so the occurrence
     start is folded into the identifier to keep each instance a distinct mirror block.
     """
+    return f"{item.eventIdentifier()}@{int(item.startDate().timeIntervalSince1970())}"
+
+
+def to_availability(availability: int) -> Availability:
+    """Map an ``EKEventAvailability`` code to an availability value."""
+    return AVAILABILITIES.get(availability, Availability.UNSUPPORTED)
+
+
+def to_url(item: Any) -> str | None:
+    """The event's URL field as text, or ``None`` when it has none."""
+    url = item.URL()
+    return None if url is None else clean(url.absoluteString())
+
+
+def to_time_zone(item: Any) -> str | None:
+    """The name of the event's time zone, or ``None`` for a floating (and so every all-day) event."""
+    time_zone = item.timeZone()
+    return None if time_zone is None else str(time_zone.name())
+
+
+def to_dates(item: Any) -> tuple[object, object] | None:
+    """An all-day event's own native start and end dates, to be reused untouched when it is copied."""
+    return (item.startDate(), item.endDate()) if item.isAllDay() else None
+
+
+def to_event(item: Any, account: str) -> Event:
+    """Convert an EventKit event to an Event for the given account, separating our marker from its notes."""
+    created = item.creationDate()
     return Event(
-        identifier=f"{item.eventIdentifier()}@{int(item.startDate().timeIntervalSince1970())}",
+        identifier=identify(item),
         title=item.title() or "",
         account=account,
         window=to_window(item),
         all_day=bool(item.isAllDay()),
         participation=response(item),
         status=to_status(item.status()),
-        notes=item.notes(),
+        notes=strip_marker(item.notes()),
+        location=clean(item.location()),
+        url=to_url(item),
+        time_zone=to_time_zone(item),
+        availability=to_availability(item.availability()),
+        tag=untag(item.notes()),
+        invited=bool(item.hasAttendees()),
+        created=None if created is None else to_datetime(created),
+        dates=to_dates(item),
+    )
+
+
+def to_mirror(item: Any, source: str) -> Mirror:
+    """Read back a mirror block we wrote for the source event ``source``, in the form it is compared in."""
+    return Mirror(
+        source=source,
+        window=to_window(item),
+        title=item.title() or "",
+        location=clean(item.location()),
+        url=to_url(item),
+        notes=strip_marker(item.notes()),
+        time_zone=to_time_zone(item),
+        availability=to_availability(item.availability()),
+        all_day=bool(item.isAllDay()),
     )
 
 
@@ -135,6 +215,11 @@ class Calendar:
         """The account this calendar belongs to."""
         return self.native.source()
 
+    def availabilities(self) -> frozenset[Availability]:
+        """The availabilities this calendar can store on an event; empty where it records none."""
+        supported = self.native.supportedEventAvailabilities()
+        return frozenset(availability for availability, mask in AVAILABILITY_MASKS.items() if supported & mask)
+
     def events(self, window: Window) -> Iterator[Event]:
         """Yield this calendar's events in the window, reduced to the fields the mirror needs."""
         account = self.source().title()
@@ -142,7 +227,7 @@ class Calendar:
 
     def busy(self, window: Window) -> Iterator[Event]:
         """Yield the genuine events here (excluding our own mirror blocks) as candidate busy periods."""
-        return (event for event in self.events(window) if untag(event.notes) is None)
+        return (event for event in self.events(window) if event.tag is None)
 
     def tagged(self, window: Window) -> Iterator[tuple[Tag, Any]]:
         """Yield our own mirror blocks in the window, paired with their decoded tag."""
@@ -158,7 +243,7 @@ class Calendar:
         calendar as orphans: each source only reconciles against its own blocks.
         """
         return {
-            marker.identifier: Mirror(marker.identifier, to_window(item), item.title())
+            marker.identifier: to_mirror(item, marker.identifier)
             for marker, item in self.tagged(window)
             if marker.origin == origin
         }
@@ -166,10 +251,13 @@ class Calendar:
     def apply(self, plan: Plan, window: Window) -> None:
         """Carry out a reconciliation plan against this calendar."""
         handles = {marker.identifier: item for marker, item in self.tagged(window)}
+        untagged = {identify(item): item for item in self.store.fetch(self, window) if untag(item.notes()) is None}
+        for adoption in plan.adopt:
+            self.store.save(self.store.apply_fields(untagged[adoption.target.identifier], adoption.mirror))
         for mirror in plan.create:
             self.store.save(self.store.build_event(mirror, self))
         for mirror in plan.update:
-            self.store.save(self.store.set_times(handles[mirror.source], mirror))
+            self.store.save(self.store.apply_fields(handles[mirror.source], mirror))
         for mirror in plan.delete:
             self.store.remove(handles[mirror.source])
 
@@ -204,17 +292,36 @@ class CalendarStore:
         yield from self.store.eventsMatchingPredicate_(predicate)
 
     def build_event(self, mirror: Mirror, calendar: Calendar) -> Any:
-        """Create a new anonymised busy event in the calendar, tagged with its origin and source identifier."""
+        """Create a new event in the calendar that copies the mirror, tagged with its origin and source identifier."""
         event = EventKit.EKEvent.eventWithEventStore_(self.store)
         event.setCalendar_(calendar.native)
-        event.setTitle_(mirror.title)
-        event.setNotes_(tag(mirror.origin, mirror.source))
-        return self.set_times(event, mirror)
+        return self.apply_fields(event, mirror)
 
-    def set_times(self, event: Any, mirror: Mirror) -> Any:
-        """Set an event's start and end to match the mirror, returning the event."""
-        event.setStartDate_(to_nsdate(mirror.start))
-        event.setEndDate_(to_nsdate(mirror.end))
+    def apply_fields(self, event: Any, mirror: Mirror) -> Any:
+        """Make an event, new or existing, match the mirror in every copied field, returning the event.
+
+        The marker is rewritten as the last line of the notes. Alarms and attendees are deliberately never
+        copied: an alarm would fire twice, and an attendee could be sent an invitation.
+        """
+        event.setTitle_(mirror.title)
+        event.setLocation_(mirror.location)
+        event.setURL_(Foundation.NSURL.URLWithString_(mirror.url) if mirror.url else None)
+        event.setNotes_(tag(mirror.origin, mirror.source, mirror.notes))
+        # The all-day flag goes on before the dates, which for an all-day event are the source's own, so the
+        # day cannot shift. An all-day event floats, so only a timed one is given a time zone.
+        event.setAllDay_(mirror.all_day)
+        if mirror.all_day and mirror.dates:
+            start, end = mirror.dates
+        else:
+            start, end = to_nsdate(mirror.start), to_nsdate(mirror.end)
+        if not mirror.all_day:
+            zone = Foundation.NSTimeZone.timeZoneWithName_(mirror.time_zone) if mirror.time_zone else None
+            event.setTimeZone_(zone)
+        event.setStartDate_(start)
+        event.setEndDate_(end)
+        mask = AVAILABILITY_MASKS.get(mirror.availability, 0)
+        if event.calendar().supportedEventAvailabilities() & mask:
+            event.setAvailability_(next(code for code, value in AVAILABILITIES.items() if value is mirror.availability))
         return event
 
     def save(self, event: Any) -> None:

@@ -7,14 +7,15 @@ constants intact for the pure conversion tests.
 
 import types
 from datetime import UTC, datetime, timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import EventKit
+import Foundation
 import pytest
 
 from calque import store
 from calque.errors import AccessError, CalendarError, WriteError
-from calque.model import Mirror, Participation, Plan, Status, Tag, Window, tag
+from calque.model import Adoption, Availability, Mirror, Participation, Plan, Status, Tag, Window, tag
 
 
 @pytest.fixture
@@ -38,7 +39,24 @@ def stub_event(window: Window, **fields: object) -> Mock:
     item.isAllDay.return_value = fields.get("all_day", False)
     item.status.return_value = fields.get("status", EventKit.EKEventStatusConfirmed)
     item.notes.return_value = fields.get("notes")
+    item.location.return_value = fields.get("location")
+    url = fields.get("url")
+    item.URL.return_value = None if url is None else Foundation.NSURL.URLWithString_(url)
+    zone = fields.get("time_zone")
+    item.timeZone.return_value = None if zone is None else Foundation.NSTimeZone.timeZoneWithName_(zone)
+    item.availability.return_value = fields.get("availability", EventKit.EKEventAvailabilityBusy)
+    created = fields.get("created")
+    item.creationDate.return_value = store.to_nsdate(created) if isinstance(created, datetime) else None
+    item.calendar.return_value.supportedEventAvailabilities.return_value = fields.get("supported", ALL_AVAILABILITIES)
     return item
+
+
+ALL_AVAILABILITIES = (
+    EventKit.EKCalendarEventAvailabilityBusy
+    | EventKit.EKCalendarEventAvailabilityFree
+    | EventKit.EKCalendarEventAvailabilityTentative
+    | EventKit.EKCalendarEventAvailabilityUnavailable
+)
 
 
 def self_attendee(status: int = EventKit.EKParticipantStatusAccepted) -> Mock:
@@ -241,8 +259,8 @@ def test_fetch_yields_events_matching_the_window_predicate(start: datetime) -> N
     assert list(calendar.store.fetch(calendar, window(start))) == matched
 
 
-def test_build_event_tags_an_anonymised_block(monkeypatch: pytest.MonkeyPatch, start: datetime) -> None:
-    created = Mock()
+def test_build_event_tags_a_new_block(monkeypatch: pytest.MonkeyPatch, start: datetime) -> None:
+    created = stub_event(window(start))
     fake_eventkit(
         monkeypatch,
         EKEvent=types.SimpleNamespace(eventWithEventStore_=lambda _store: created),
@@ -255,12 +273,173 @@ def test_build_event_tags_an_anonymised_block(monkeypatch: pytest.MonkeyPatch, s
     created.setNotes_.assert_called_once_with(tag("Personal.Home", "source-1"))
 
 
-def test_set_times_writes_the_mirror_bounds(start: datetime) -> None:
-    event = Mock()
+def test_apply_fields_writes_the_mirror_bounds(start: datetime) -> None:
+    event = stub_event(window(start))
     mirror = Mirror("source-1", window(start), "Busy")
-    assert detached_store(Mock()).set_times(event, mirror) is event
-    event.setStartDate_.assert_called_once()
-    event.setEndDate_.assert_called_once()
+    assert detached_store(Mock()).apply_fields(event, mirror) is event
+    assert store.to_datetime(event.setStartDate_.call_args.args[0]) == start
+    assert store.to_datetime(event.setEndDate_.call_args.args[0]) == start + timedelta(hours=1)
+
+
+def test_apply_fields_writes_a_changed_title_on_an_existing_event(start: datetime) -> None:
+    # Stock calque only reset the times on update, so a renamed source event kept its old title in the copy.
+    event = stub_event(window(start), title="Old name")
+    detached_store(Mock()).apply_fields(event, Mirror("source-1", window(start), "New name"))
+    event.setTitle_.assert_called_once_with("New name")
+
+
+def test_apply_fields_copies_location_url_notes_and_time_zone(start: datetime) -> None:
+    event = stub_event(window(start))
+    mirror = Mirror(
+        "source-1",
+        window(start),
+        "Clinic",
+        location="Room 4",
+        url="https://zoom.us/j/123",
+        notes="Bring the slides",
+        time_zone="America/Chicago",
+        origin="Work.Office",
+    )
+    detached_store(Mock()).apply_fields(event, mirror)
+    event.setLocation_.assert_called_once_with("Room 4")
+    assert event.setURL_.call_args.args[0].absoluteString() == "https://zoom.us/j/123"
+    event.setNotes_.assert_called_once_with(tag("Work.Office", "source-1", "Bring the slides"))
+    assert event.setNotes_.call_args.args[0].startswith("Bring the slides\n\n")
+    assert event.setTimeZone_.call_args.args[0].name() == "America/Chicago"
+    event.setAllDay_.assert_called_once_with(False)  # noqa: FBT003 - asserting the positional PyObjC argument
+
+
+def test_apply_fields_clears_fields_the_source_no_longer_has(start: datetime) -> None:
+    event = stub_event(window(start), location="Room 4", url="https://zoom.us/j/123", time_zone="America/Chicago")
+    detached_store(Mock()).apply_fields(event, Mirror("source-1", window(start), "Clinic", origin="Work.Office"))
+    event.setLocation_.assert_called_once_with(None)
+    event.setURL_.assert_called_once_with(None)
+    event.setTimeZone_.assert_called_once_with(None)
+    event.setNotes_.assert_called_once_with(tag("Work.Office", "source-1"))
+
+
+def test_apply_fields_never_touches_alarms_or_attendees(start: datetime) -> None:
+    event = stub_event(window(start))
+    detached_store(Mock()).apply_fields(event, Mirror("source-1", window(start), "Clinic"))
+    touched = {name for name, _, _ in event.method_calls}
+    assert not {name for name in touched if "larm" in name or "ttendee" in name}
+
+
+def test_apply_fields_sets_all_day_before_reusing_the_sources_own_dates(start: datetime) -> None:
+    first, last = object(), object()  # the source event's native dates: they must be passed through untouched
+    event = stub_event(window(start))
+    mirror = Mirror("source-1", window(start, hours=24), "Holiday", all_day=True, dates=(first, last))
+    detached_store(Mock()).apply_fields(event, mirror)
+    names = [name for name, _, _ in event.method_calls]
+    assert names.index("setAllDay_") < names.index("setStartDate_") < names.index("setEndDate_")
+    assert event.method_calls[names.index("setAllDay_")] == call.setAllDay_(True)
+    assert event.setStartDate_.call_args.args[0] is first
+    assert event.setEndDate_.call_args.args[0] is last
+    # An all-day event floats: it is given no time zone, which could shift its day.
+    event.setTimeZone_.assert_not_called()
+
+
+def test_apply_fields_falls_back_to_the_window_for_an_all_day_block_without_native_dates(start: datetime) -> None:
+    event = stub_event(window(start))
+    detached_store(Mock()).apply_fields(event, Mirror("source-1", window(start, hours=24), "Holiday", all_day=True))
+    assert store.to_datetime(event.setStartDate_.call_args.args[0]) == start
+    event.setTimeZone_.assert_not_called()
+
+
+def test_apply_fields_sets_an_availability_the_calendar_supports(start: datetime) -> None:
+    event = stub_event(window(start))
+    mirror = Mirror("source-1", window(start), "Hold", availability=Availability.FREE)
+    detached_store(Mock()).apply_fields(event, mirror)
+    event.setAvailability_.assert_called_once_with(EventKit.EKEventAvailabilityFree)
+
+
+@pytest.mark.parametrize(
+    ("availability", "supported"),
+    [
+        pytest.param(Availability.TENTATIVE, EventKit.EKCalendarEventAvailabilityBusy, id="calendar cannot store it"),
+        pytest.param(Availability.BUSY, EventKit.EKCalendarEventAvailabilityNone, id="calendar stores none"),
+        pytest.param(Availability.UNSUPPORTED, ALL_AVAILABILITIES, id="source did not record one"),
+    ],
+)
+def test_apply_fields_leaves_an_unsupported_availability_alone(
+    start: datetime, availability: Availability, supported: int
+) -> None:
+    event = stub_event(window(start), supported=supported)
+    detached_store(Mock()).apply_fields(event, Mirror("source-1", window(start), "Hold", availability=availability))
+    event.setAvailability_.assert_not_called()
+
+
+def test_to_event_reads_every_copied_field(start: datetime) -> None:
+    item = stub_event(
+        window(start),
+        location=" Room 4 ",
+        url="https://zoom.us/j/123",
+        notes="Bring the slides",
+        time_zone="America/Chicago",
+        availability=EventKit.EKEventAvailabilityFree,
+        has_attendees=True,
+        created=start - timedelta(days=3),
+    )
+    event = store.to_event(item, "Client")
+    assert event.location == "Room 4"
+    assert event.url == "https://zoom.us/j/123"
+    assert event.notes == "Bring the slides"
+    assert event.time_zone == "America/Chicago"
+    assert event.availability is Availability.FREE
+    assert event.invited
+    assert event.created == start - timedelta(days=3)
+    assert event.tag is None
+    assert event.dates is None
+
+
+def test_to_event_defaults_the_fields_an_event_lacks(start: datetime) -> None:
+    event = store.to_event(stub_event(window(start)), "Client")
+    assert (event.location, event.url, event.notes, event.time_zone, event.created) == (None, None, None, None, None)
+    assert event.availability is Availability.BUSY
+    assert not event.invited
+
+
+def test_to_event_separates_our_marker_from_the_notes(start: datetime) -> None:
+    item = stub_event(window(start), notes=tag("Work.Office", "source-1", "Bring the slides"))
+    event = store.to_event(item, "Client")
+    assert event.notes == "Bring the slides"
+    assert event.tag == Tag(origin="Work.Office", identifier="source-1")
+
+
+def test_to_event_recognises_a_block_tagged_by_stock_calque(start: datetime) -> None:
+    event = store.to_event(stub_event(window(start), notes=tag("Work.Office", "source-1")), "Client")
+    assert event.notes is None
+    assert event.tag == Tag(origin="Work.Office", identifier="source-1")
+
+
+def test_to_event_keeps_an_all_day_events_own_dates(start: datetime) -> None:
+    item = stub_event(window(start, hours=24), all_day=True)
+    event = store.to_event(item, "Client")
+    assert event.all_day
+    assert event.dates == (item.startDate.return_value, item.endDate.return_value)
+    assert event.dates[0] is item.startDate.return_value
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (EventKit.EKEventAvailabilityBusy, Availability.BUSY),
+        (EventKit.EKEventAvailabilityFree, Availability.FREE),
+        (EventKit.EKEventAvailabilityTentative, Availability.TENTATIVE),
+        (EventKit.EKEventAvailabilityUnavailable, Availability.UNAVAILABLE),
+        (EventKit.EKEventAvailabilityNotSupported, Availability.UNSUPPORTED),
+    ],
+)
+def test_to_availability_maps_each_code(code: int, expected: Availability) -> None:
+    assert store.to_availability(code) is expected
+
+
+def test_availabilities_lists_what_the_calendar_can_store() -> None:
+    native = Mock(**{"supportedEventAvailabilities.return_value": EventKit.EKCalendarEventAvailabilityBusy | 2})
+    calendar = store.Calendar(detached_store(Mock()), native, "Work.Office")
+    assert calendar.availabilities() == frozenset({Availability.BUSY, Availability.FREE})
+    native.supportedEventAvailabilities.return_value = EventKit.EKCalendarEventAvailabilityNone
+    assert calendar.availabilities() == frozenset()
 
 
 def test_save_persists_a_successful_write() -> None:
@@ -344,6 +523,32 @@ def test_mirrors_reads_back_blocks_keyed_by_source(start: datetime) -> None:
     assert mirrors == {"source-1": Mirror("source-1", window(start), "Busy")}
 
 
+def test_mirrors_reads_back_every_copied_field_without_the_marker(start: datetime) -> None:
+    native_store = Mock()
+    native_store.eventsMatchingPredicate_.return_value = [
+        stub_event(
+            window(start, hours=24),
+            title=None,
+            notes=tag("Personal.Home", "source-1", "Bring the slides"),
+            location="Room 4",
+            url="https://zoom.us/j/123",
+            availability=EventKit.EKEventAvailabilityFree,
+            all_day=True,
+        ),
+    ]
+    expected = Mirror(
+        "source-1",
+        window(start, hours=24),
+        "",
+        location="Room 4",
+        url="https://zoom.us/j/123",
+        notes="Bring the slides",
+        availability=Availability.FREE,
+        all_day=True,
+    )
+    assert calendar_with(native_store).mirrors(window(start), "Personal.Home") == {"source-1": expected}
+
+
 def test_mirrors_excludes_blocks_from_a_different_origin(start: datetime) -> None:
     # A block another source wrote into this calendar must not appear when reconciling our own origin,
     # or it would be treated as an orphan and deleted.
@@ -357,7 +562,7 @@ def test_mirrors_excludes_blocks_from_a_different_origin(start: datetime) -> Non
 def test_apply_creates_updates_and_deletes_against_the_store(monkeypatch: pytest.MonkeyPatch, start: datetime) -> None:
     fake_eventkit(
         monkeypatch,
-        EKEvent=types.SimpleNamespace(eventWithEventStore_=lambda _store: Mock()),
+        EKEvent=types.SimpleNamespace(eventWithEventStore_=lambda _store: stub_event(window(start))),
         EKSpanThisEvent=EventKit.EKSpanThisEvent,
     )
     existing = stub_event(window(start), notes=tag("Personal.Home", "stays"))
@@ -375,3 +580,19 @@ def test_apply_creates_updates_and_deletes_against_the_store(monkeypatch: pytest
     calendar.apply(plan, window(start))
     assert native_store.saveEvent_span_error_.call_count == 2  # one create, one update
     native_store.removeEvent_span_error_.assert_called_once_with(going, EventKit.EKSpanThisEvent, None)
+
+
+def test_apply_adopts_an_untagged_event_by_tagging_it_in_place(start: datetime) -> None:
+    stray = stub_event(window(start), identifier="stray", title="Clinic", notes="left by another tool")
+    bystander = stub_event(window(start), identifier="bystander", title="Clinic")
+    native_store = Mock()
+    native_store.saveEvent_span_error_.return_value = (True, None)
+    native_store.eventsMatchingPredicate_.return_value = [bystander, stray]
+    calendar = calendar_with(native_store)
+    target = store.to_event(stray, "Client")
+    mirror = Mirror("source-1", window(start), "Clinic", notes="Bring the slides", origin="Personal.Home")
+    calendar.apply(Plan(create=(), update=(), delete=(), adopt=(Adoption(mirror, target),)), window(start))
+    native_store.saveEvent_span_error_.assert_called_once_with(stray, EventKit.EKSpanThisEvent, None)
+    stray.setNotes_.assert_called_once_with(tag("Personal.Home", "source-1", "Bring the slides"))
+    bystander.setNotes_.assert_not_called()
+    native_store.removeEvent_span_error_.assert_not_called()
