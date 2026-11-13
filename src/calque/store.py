@@ -26,6 +26,7 @@ from calque.model import (
     Tag,
     Window,
     clean,
+    parts,
     strip_marker,
     tag,
     untag,
@@ -118,13 +119,15 @@ def to_event(item: Any, account: str) -> Event:
 
 def to_mirror(item: Any, source: str) -> Mirror:
     """Read back a mirror block we wrote for the source event ``source``, in the form it is compared in."""
+    body, _, trailer = parts(item.notes())
     return Mirror(
         source=source,
         window=to_window(item),
         title=item.title() or "",
         location=clean(item.location()),
         url=to_url(item),
-        notes=strip_marker(item.notes()),
+        notes=strip_marker(body),
+        trailer=trailer,
         time_zone=to_time_zone(item),
         availability=to_availability(item.availability()),
         all_day=bool(item.isAllDay()),
@@ -308,13 +311,16 @@ class CalendarStore:
     def apply_fields(self, event: Any, mirror: Mirror) -> Any:
         """Make an event, new or existing, match the mirror in every copied field, returning the event.
 
-        The marker is rewritten as the last line of the notes. Alarms and attendees are deliberately never
+        The marker is rewritten as the last line of the notes, followed by any trailer the event had gained
+        below its old marker, which is not ours to discard. Alarms and attendees are deliberately never
         copied: an alarm would fire twice, and an attendee could be sent an invitation.
         """
         event.setTitle_(mirror.title)
         event.setLocation_(mirror.location)
         event.setURL_(Foundation.NSURL.URLWithString_(mirror.url) if mirror.url else None)
-        event.setNotes_(tag(mirror.origin, mirror.source, mirror.notes))
+        trailer = parts(event.notes())[2]
+        notes = tag(mirror.origin, mirror.source, mirror.notes)
+        event.setNotes_(f"{notes}\n\n{trailer}" if trailer else notes)
         # The all-day flag goes on before the dates, which for an all-day event are the source's own, so the
         # day cannot shift. An all-day event floats, so only a timed one is given a time zone.
         event.setAllDay_(mirror.all_day)

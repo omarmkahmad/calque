@@ -574,6 +574,28 @@ def test_settle_stops_rewriting_once_the_link_is_in_the_notes(start: datetime) -
     assert settle(wanted, stored, EVERY_AVAILABILITY) == stored
 
 
+def test_settle_leaves_a_location_the_target_moved_below_the_marker(start: datetime) -> None:
+    wanted = replace(block("one", start), location="https://zoom.us/j/123")
+    stored = replace(block("one", start), trailer="Join Zoom Meeting\nhttps://zoom.us/j/123")
+    assert settle(wanted, stored, EVERY_AVAILABILITY) == stored
+
+
+@pytest.mark.parametrize(
+    ("trailer", "location"),
+    [
+        pytest.param(None, None, id="nothing below the marker"),
+        pytest.param("Join Zoom Meeting", None, id="trailer without the location"),
+        pytest.param("https://zoom.us/j/123", "Elsewhere", id="target still has a location"),
+    ],
+)
+def test_settle_restores_a_location_the_target_merely_lost(
+    start: datetime, trailer: str | None, location: str | None
+) -> None:
+    wanted = replace(block("one", start), location="https://zoom.us/j/123")
+    stored = replace(block("one", start), trailer=trailer, location=location)
+    assert settle(wanted, stored, EVERY_AVAILABILITY).location == wanted.location
+
+
 def test_settle_keeps_the_targets_availability_when_it_cannot_store_the_sources(start: datetime) -> None:
     wanted = replace(block("one", start), availability=Availability.TENTATIVE)
     stored = block("one", start)

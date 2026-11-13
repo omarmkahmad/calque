@@ -318,6 +318,20 @@ def test_apply_fields_clears_fields_the_source_no_longer_has(start: datetime) ->
     event.setNotes_.assert_called_once_with(tag("Work.Office", "source-1"))
 
 
+def test_apply_fields_keeps_text_the_event_gained_below_its_marker(start: datetime) -> None:
+    trailer = "Join Zoom Meeting\nhttps://zoom.us/j/123"
+    event = stub_event(window(start), notes=f"Old notes\n\n{tag('Work.Office', 'source-1')}\n\n{trailer}")
+    mirror = Mirror("source-1", window(start), "Clinic", notes="New notes", origin="Work.Office")
+    detached_store(Mock()).apply_fields(event, mirror)
+    event.setNotes_.assert_called_once_with(f"{tag('Work.Office', 'source-1', 'New notes')}\n\n{trailer}")
+
+
+def test_to_mirror_reads_the_trailer_apart_from_the_notes(start: datetime) -> None:
+    item = stub_event(window(start), notes=f"Agenda\n\n{tag('Work.Office', 'source-1')}\n\nJoin Zoom Meeting")
+    block = store.to_mirror(item, "source-1")
+    assert (block.notes, block.trailer) == ("Agenda", "Join Zoom Meeting")
+
+
 def test_apply_fields_never_touches_alarms_or_attendees(start: datetime) -> None:
     event = stub_event(window(start))
     detached_store(Mock()).apply_fields(event, Mirror("source-1", window(start), "Clinic"))

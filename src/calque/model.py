@@ -77,18 +77,24 @@ def clean(text: str | None) -> str | None:
     return (text or "").replace("\r\n", "\n").strip() or None
 
 
-def split(notes: str | None) -> tuple[str | None, str | None]:
-    """Split a notes field into the user-visible body and our marker line, either of which may be absent.
+def parts(notes: str | None) -> tuple[str | None, str | None, str | None]:
+    """Split a notes field into the body above our marker line, the marker line, and any trailer below it.
 
-    The marker is the last line of the notes. Stock calque wrote it as the whole field (which is also a last
-    line) and so, for a block whose notes gained text afterwards, it is still recognised on the first line.
+    We write the marker as the last line, so a trailer is text added afterwards: by a calendar server (Google
+    moves a meeting link out of the location into a block at the end of the description) or by hand. Stock
+    calque wrote the marker as the whole field, which is the same shape with no body.
     """
     lines = (clean(notes) or "").split("\n")
-    if lines[-1].startswith(MARKER):
-        return clean("\n".join(lines[:-1])), lines[-1]
-    if lines[0].startswith(MARKER):
-        return clean("\n".join(lines[1:])), lines[0]
-    return clean(notes), None
+    found = [index for index, line in enumerate(lines) if line.startswith(MARKER)]
+    if not found:
+        return clean(notes), None, None
+    return clean("\n".join(lines[: found[-1]])), lines[found[-1]], clean("\n".join(lines[found[-1] + 1 :]))
+
+
+def split(notes: str | None) -> tuple[str | None, str | None]:
+    """Split a notes field into its text (the body and any trailer) and our marker line, either of which may be absent."""
+    body, marker, trailer = parts(notes)
+    return clean("\n\n".join(part for part in (body, trailer) if part)), marker
 
 
 def strip_marker(notes: str | None) -> str | None:
@@ -177,6 +183,8 @@ class Mirror:
     all_day: bool = False
     # Excluded from equality:
     original: str | None = field(default=None, compare=False)
+    # Text found below the marker on a block read back for diffing (see :func:`parts`); never set on a wanted block.
+    trailer: str | None = field(default=None, compare=False, repr=False)
     # The source's native all-day dates (see ``Event.dates``), absent on blocks read back for diffing.
     dates: tuple[object, object] | None = field(default=None, compare=False, repr=False)
     # The calendar this block was copied from, stored in the tag so a mirror is never returned to its

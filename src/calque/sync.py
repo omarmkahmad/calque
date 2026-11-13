@@ -138,12 +138,16 @@ def settle(mirror: Mirror, existing: Mirror | None, availabilities: Collection[A
 
     - A target block that came back without the URL it was written with (some backends drop the field) carries
       the link on the first line of its notes instead, unless the notes or location already contain it.
+    - A location the target moved into a trailer below our marker (Google does this with a meeting link) is
+      left where the target put it.
     - An availability the target calendar cannot record is left as whatever the target block holds.
     """
     if existing is None:
         return mirror
     if existing.url is None:
         mirror = relocate(mirror)
+    if mirror.location and existing.location is None and mirror.location in (existing.trailer or ""):
+        mirror = replace(mirror, location=None)
     if mirror.availability not in availabilities:
         mirror = replace(mirror, availability=existing.availability)
     return mirror

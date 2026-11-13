@@ -20,6 +20,7 @@ from calque.model import (
     Tag,
     Window,
     clean,
+    parts,
     split,
     strip_marker,
     tag,
@@ -187,13 +188,29 @@ def test_untag_survives_trailing_whitespace_a_backend_appends() -> None:
     assert untag(f"Bring the slides\r\n\r\n{OLD_FORMAT}\r\n\r\n") == Tag("Work.Office", "ABC-123")
 
 
-def test_untag_ignores_a_marker_that_is_not_at_the_start_of_the_first_or_last_line() -> None:
+def test_untag_ignores_a_marker_that_does_not_start_a_line() -> None:
     assert untag(f"see {MARKER} ABC-123 Work.Office") is None
-    assert untag(f"intro\n{OLD_FORMAT}\noutro") is None
+
+
+def test_untag_recognises_a_marker_with_text_on_both_sides() -> None:
+    # Google appends a meeting-link block to the description, below a marker that has notes above it.
+    assert untag(f"Agenda\n\n{OLD_FORMAT}\n\nJoin Zoom Meeting") == Tag("Work.Office", "ABC-123")
+
+
+def test_parts_separates_the_body_the_marker_and_the_trailer() -> None:
+    assert parts(f"Agenda\n\n{OLD_FORMAT}\n\nJoin Zoom Meeting\nhttps://zoom.us/j/1") == (
+        "Agenda",
+        OLD_FORMAT,
+        "Join Zoom Meeting\nhttps://zoom.us/j/1",
+    )
+    assert parts(f"Agenda\n\n{OLD_FORMAT}") == ("Agenda", OLD_FORMAT, None)
+    assert parts("Agenda") == ("Agenda", None, None)
+    assert parts(None) == (None, None, None)
 
 
 def test_split_separates_the_body_from_the_marker_line() -> None:
     assert split(f"Bring the slides\n\n{OLD_FORMAT}") == ("Bring the slides", OLD_FORMAT)
+    assert split(f"Agenda\n\n{OLD_FORMAT}\n\nadded later") == ("Agenda\n\nadded later", OLD_FORMAT)
     assert split("Bring the slides") == ("Bring the slides", None)
     assert split(None) == (None, None)
 
