@@ -20,6 +20,7 @@ from calque.sync import (
     mirror,
     overlay,
     reconcile,
+    relocate,
     settle,
     staged,
     synchronise,
@@ -127,6 +128,7 @@ def calendar(qualified: str) -> Mock:
             "busy.return_value": [],
             "mirrors.return_value": {},
             "availabilities.return_value": EVERY_AVAILABILITY,
+            "keeps_urls.return_value": True,
             "source.return_value.title.return_value": qualified.partition(".")[0],
         },
     )
@@ -522,6 +524,16 @@ def test_mirror_with_adoption_off_creates_alongside_a_lookalike(start: datetime)
     assert [created.source for created in plan.create] == ["clinic"]
 
 
+def test_relocate_leaves_a_block_without_a_url_as_it_is(start: datetime) -> None:
+    wanted = replace(block("one", start), notes="Agenda")
+    assert relocate(wanted) is wanted
+
+
+def test_relocate_moves_the_url_to_the_first_line_of_the_notes(start: datetime) -> None:
+    moved = relocate(replace(block("one", start), url="https://zoom.us/j/123", notes="Agenda"))
+    assert (moved.url, moved.notes) == (None, "https://zoom.us/j/123\n\nAgenda")
+
+
 def test_settle_leaves_a_new_block_as_it_is(start: datetime) -> None:
     wanted = replace(block("one", start), url="https://zoom.us/j/123")
     assert settle(wanted, None, EVERY_AVAILABILITY) is wanted
@@ -577,6 +589,19 @@ def test_mirror_does_not_keep_rewriting_a_block_whose_url_the_target_dropped(sta
     plan = mirror(source, target, Config(), window)
     assert [(changed.url, changed.notes) for changed in plan.update] == [(None, "https://zoom.us/j/123\n\nAgenda")]
     target.mirrors.return_value = {"clinic": plan.update[0]}
+    assert mirror(source, target, Config(), window).empty
+
+
+def test_mirror_writes_the_link_into_the_notes_of_a_target_that_never_keeps_urls(start: datetime) -> None:
+    # Exchange reads the URL back from the local store although the server dropped it, so nothing can be
+    # learned from the block that comes back: the link goes in the notes from the first write.
+    source, target = calendar("Work.Calendar"), calendar("Exchange.Calendar")
+    target.keeps_urls.return_value = False
+    source.events.return_value = [detailed("clinic", start, url="https://zoom.us/j/123", notes="Agenda")]
+    window = Window(start, start + timedelta(days=1))
+    plan = mirror(source, target, Config(), window)
+    assert [(created.url, created.notes) for created in plan.create] == [(None, "https://zoom.us/j/123\n\nAgenda")]
+    target.mirrors.return_value = {"clinic": plan.create[0]}
     assert mirror(source, target, Config(), window).empty
 
 

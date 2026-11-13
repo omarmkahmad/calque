@@ -1,6 +1,6 @@
 """Drive a synchronisation run: reconcile events between calendars and mirror them between primary and auxiliaries.
 
-The reconciliation core (:func:`to_mirrors`, :func:`designate`, :func:`adoptions`, :func:`settle`,
+The reconciliation core (:func:`to_mirrors`, :func:`designate`, :func:`adoptions`, :func:`relocate`, :func:`settle`,
 :func:`reconcile`) stays pure; the impure edges — reading the clock and opening the calendar store — live in
 :func:`synchronise`, the process entry.
 """
@@ -122,6 +122,17 @@ def with_link(url: str, notes: str | None) -> str:
     return f"{url}\n\n{notes}" if notes else url
 
 
+def relocate(mirror: Mirror) -> Mirror:
+    """Move a block's URL to the first line of its notes, unless the notes or location already contain it.
+
+    A block without a URL is returned as it is.
+    """
+    if not mirror.url:
+        return mirror
+    carried = mirror.url in (mirror.notes or "") or mirror.url in (mirror.location or "")
+    return replace(mirror, url=None, notes=mirror.notes if carried else with_link(mirror.url, mirror.notes))
+
+
 def settle(mirror: Mirror, existing: Mirror | None, availabilities: Collection[Availability]) -> Mirror:
     """Adapt a wanted block to what its target has shown it cannot store, so it is not rewritten on every run.
 
@@ -131,9 +142,8 @@ def settle(mirror: Mirror, existing: Mirror | None, availabilities: Collection[A
     """
     if existing is None:
         return mirror
-    if mirror.url and existing.url is None:
-        carried = mirror.url in (mirror.notes or "") or mirror.url in (mirror.location or "")
-        mirror = replace(mirror, url=None, notes=mirror.notes if carried else with_link(mirror.url, mirror.notes))
+    if existing.url is None:
+        mirror = relocate(mirror)
     if mirror.availability not in availabilities:
         mirror = replace(mirror, availability=existing.availability)
     return mirror
@@ -212,6 +222,8 @@ def mirror(
     title = config.title_for_calendar(source, target)
     events = overlay(source.events(window), carry.pending)
     desired = to_mirrors(included(events, exclusions), title, source.qualified)
+    if not target.keeps_urls():
+        desired = {identifier: relocate(block) for identifier, block in desired.items()}
     existing = target.mirrors(window, source.qualified)
     adopt, present = adoptions(desired, existing, target.events(window), carry.copies) if config.adopt else ((), ())
     handled = {*present, *(adoption.mirror.source for adoption in adopt)}

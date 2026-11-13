@@ -220,6 +220,14 @@ class Calendar:
         supported = self.native.supportedEventAvailabilities()
         return frozenset(availability for availability, mask in AVAILABILITY_MASKS.items() if supported & mask)
 
+    def keeps_urls(self) -> bool:
+        """Whether an event's URL field survives on this calendar's server.
+
+        Exchange has no such field: the URL stays in the local store, so it reads back intact here, but it never
+        reaches the server or any other device.
+        """
+        return bool(self.native.source().sourceType() != EventKit.EKSourceTypeExchange)
+
     def events(self, window: Window) -> Iterator[Event]:
         """Yield this calendar's events in the window, reduced to the fields the mirror needs."""
         account = self.source().title()

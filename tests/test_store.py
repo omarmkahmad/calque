@@ -434,6 +434,18 @@ def test_to_availability_maps_each_code(code: int, expected: Availability) -> No
     assert store.to_availability(code) is expected
 
 
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        pytest.param(EventKit.EKSourceTypeExchange, False, id="exchange drops it"),
+        pytest.param(EventKit.EKSourceTypeCalDAV, True, id="caldav keeps it"),
+    ],
+)
+def test_keeps_urls_is_false_only_for_exchange(kind: int, *, expected: bool) -> None:
+    native = Mock(**{"source.return_value.sourceType.return_value": kind})
+    assert store.Calendar(detached_store(Mock()), native, "Work.Office").keeps_urls() is expected
+
+
 def test_availabilities_lists_what_the_calendar_can_store() -> None:
     native = Mock(**{"supportedEventAvailabilities.return_value": EventKit.EKCalendarEventAvailabilityBusy | 2})
     calendar = store.Calendar(detached_store(Mock()), native, "Work.Office")
